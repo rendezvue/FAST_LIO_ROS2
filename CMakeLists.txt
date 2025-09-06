@@ -116,13 +116,22 @@ endif()
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping
+install(TARGETS fastlio_mapping 
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install Python scripts
+install(PROGRAMS
+  script/crop_pointcloud.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME crop_pointcloud
+)
+
 install(
-  DIRECTORY config launch rviz maps
+  DIRECTORY config launch rviz maps script
   DESTINATION share/${PROJECT_NAME}
 )
+
+
 
 ament_package()
