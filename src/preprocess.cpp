@@ -518,7 +518,8 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
     added_pt.z = pl_orig.points[i].z;
     added_pt.intensity = pl_orig.points[i].intensity;
     added_pt.curvature = 0.;
-
+    if (added_pt.x < 0) continue;
+    
     int layer = pl_orig.points[i].ring;
     double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
 
