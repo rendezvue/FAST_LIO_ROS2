@@ -549,7 +549,8 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
     yaw_last[layer] = yaw_angle;
     time_last[layer] = added_pt.curvature;
 
-    if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+    float distance = added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z;
+    if (distance > (blind * blind) && distance < 20)
     {
       pl_surf.push_back(std::move(added_pt));
     }
