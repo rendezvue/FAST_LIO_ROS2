@@ -12,7 +12,7 @@
             # lid_topic:  "/velodyne_points"
             # imu_topic:  "/imu/data"
             lid_topic:  "/livox/lidar_192_168_70_4"
-            imu_topic:  "/livox/imu_192_168_70_4"
+            imu_topic:  "/imu/data"
             # lid_topic:  "/mid360_PointCloud2"
             # imu_topic:  "/imu/data"
             # lid_topic:  "/livox/points"
@@ -53,6 +53,6 @@
             scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
 
         pcd_save:
-            pcd_save_en: true
+            pcd_save_en: false
             interval: -1                 # how many LiDAR frames saved in each pcd file;
                                         # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

@@ -62,7 +62,8 @@
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
-
+#include <std_srvs/srv/set_bool.hpp>
+#include <std_srvs/srv/empty.hpp>
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
 #define MAXN                (720000)
@@ -98,10 +99,10 @@ bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
-
-vector<vector<int>>  pointSearchInd_surf; 
+bool   paused_ = false;
+vector<vector<int>>  pointSearchInd_surf;
 vector<BoxPointType> cub_needrm;
-vector<PointVector>  Nearest_Points; 
+vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
@@ -151,19 +152,19 @@ void SigHandle(int sig)
     rclcpp::shutdown();
 }
 
-inline void dump_lio_state_to_log(FILE *fp)  
+inline void dump_lio_state_to_log(FILE *fp)
 {
     V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
     fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
     fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));                   // Angle
-    fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos  
-    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega  
-    fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1), state_point.vel(2)); // Vel  
-    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // Acc  
-    fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g  
-    fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a  
-    fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a  
-    fprintf(fp, "\r\n");  
+    fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega
+    fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1), state_point.vel(2)); // Vel
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // Acc
+    fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g
+    fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a
+    fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a
+    fprintf(fp, "\r\n");
     fflush(fp);
 }
 
@@ -236,7 +237,7 @@ void lasermap_fov_segment()
 {
     cub_needrm.clear();
     kdtree_delete_counter = 0;
-    kdtree_delete_time = 0.0;    
+    kdtree_delete_time = 0.0;
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
     V3D pos_LiD = pos_lid;
     if (!Localmap_Initialized){
@@ -280,8 +281,10 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
+    if (paused_) return;
+
     mtx_buffer.lock();
     scan_count ++;
     double cur_time = get_time_sec(msg->header.stamp);
@@ -308,8 +311,10 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) 
+void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 {
+    if (paused_) return;
+
     mtx_buffer.lock();
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
@@ -324,7 +329,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
         is_first_lidar = false;
     }
     last_timestamp_lidar = cur_time;
-    
+
     if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
     {
         printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
@@ -341,7 +346,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
-    
+
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -349,10 +354,12 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
+    if (paused_) return;
+
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
-    
+
 
     msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
@@ -451,7 +458,7 @@ void map_incremental()
             const PointVector &points_near = Nearest_Points[i];
             bool need_add = true;
             BoxPointType Box_of_Point;
-            PointType downsample_result, mid_point; 
+            PointType downsample_result, mid_point;
             mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
             mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
             mid_point.z = floor(feats_down_world->points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
@@ -479,7 +486,7 @@ void map_incremental()
 
     double st_time = omp_get_wtime();
     add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    ikdtree.Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -622,7 +629,7 @@ void set_posestamp(T & out)
     out.pose.orientation.y = geoQuat.y;
     out.pose.orientation.z = geoQuat.z;
     out.pose.orientation.w = geoQuat.w;
-    
+
 }
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
@@ -667,7 +674,7 @@ void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
     /*** if path is too large, the rvis will crash ***/
     static int jjj = 0;
     jjj++;
-    if (jjj % 10 == 0) 
+    if (jjj % 10 == 0)
     {
         path.poses.push_back(msg_body_pose);
         pubPath->publish(path);
@@ -677,9 +684,9 @@ void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     double match_start = omp_get_wtime();
-    laserCloudOri->clear(); 
-    corr_normvect->clear(); 
-    total_residual = 0.0; 
+    laserCloudOri->clear();
+    corr_normvect->clear();
+    total_residual = 0.0;
 
     /** closest surface search and residual computation **/
     #ifdef MP_EN
@@ -688,8 +695,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     #endif
     for (int i = 0; i < feats_down_size; i++)
     {
-        PointType &point_body  = feats_down_body->points[i]; 
-        PointType &point_world = feats_down_world->points[i]; 
+        PointType &point_body  = feats_down_body->points[i];
+        PointType &point_world = feats_down_world->points[i];
 
         /* transform to world frame */
         V3D p_body(point_body.x, point_body.y, point_body.z);
@@ -730,7 +737,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             }
         }
     }
-    
+
     effct_feat_num = 0;
 
     for (int i = 0; i < feats_down_size; i++)
@@ -755,7 +762,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     res_mean_last = total_residual / effct_feat_num;
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
-    
+
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
     ekfom_data.h.resize(effct_feat_num);
@@ -939,11 +946,16 @@ public:
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
         timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
 
-        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
+        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 5.0));
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
+        reset_mapping_srv_ = this->create_service<std_srvs::srv::Empty>("reset_mapping", std::bind(&LaserMappingNode::reset_mapping_callback, this, std::placeholders::_1, std::placeholders::_2));
+
+        set_pause_srv_ = this->create_service<std_srvs::srv::SetBool>("pause_mapping",
+            std::bind(&LaserMappingNode::set_mapping_paused_callback, this,
+            std::placeholders::_1, std::placeholders::_2));
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
@@ -957,6 +969,8 @@ public:
 private:
     void timer_callback()
     {
+        if (paused_) return;
+
         if(sync_packages(Measures))
         {
             if (flg_first_scan)
@@ -1014,7 +1028,7 @@ private:
             }
             int featsFromMapNum = ikdtree.validnum();
             kdtree_size_st = ikdtree.size();
-            
+
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
             /*** ICP and iterated Kalman filter update ***/
@@ -1023,7 +1037,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
                 return;
             }
-            
+
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
@@ -1045,7 +1059,7 @@ private:
             bool nearest_search_en = true; //
 
             t2 = omp_get_wtime();
-            
+
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
@@ -1067,7 +1081,7 @@ private:
             t3 = omp_get_wtime();
             map_incremental();
             t5 = omp_get_wtime();
-            
+
             /******* Publish points *******/
             if (path_en)                         publish_path(pubPath_);
             if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
@@ -1109,11 +1123,20 @@ private:
 
     void map_publish_callback()
     {
+        if (paused_) return;
+
         if (map_pub_en) publish_map(pubLaserCloudMap_);
     }
 
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
     {
+        if (paused_) {
+            res->success = false;
+            res->message = "Paused: map save skipped.";
+            RCLCPP_WARN(this->get_logger(), "Map save requested while paused.");
+            return;
+        }
+
         RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
         if (pcd_save_en)
         {
@@ -1125,6 +1148,209 @@ private:
         {
             res->success = false;
             res->message = "Map save disabled.";
+        }
+    }
+    void reset_mapping_callback(std_srvs::srv::Empty::Request::ConstSharedPtr req,
+                            std_srvs::srv::Empty::Response::SharedPtr res)
+    {
+        RCLCPP_INFO(this->get_logger(), "Complete FAST-LIO reset...");
+
+        try {
+            {
+                std::lock_guard<std::mutex> lock(mtx_buffer);
+                lidar_buffer.clear();
+                imu_buffer.clear();
+                time_buffer.clear();
+            }
+
+            if (ikdtree.Root_Node != nullptr) {
+                PointVector points_to_delete;
+                ikdtree.flatten(ikdtree.Root_Node, points_to_delete, NOT_RECORD);
+                ikdtree.Delete_Points(points_to_delete);
+            }
+
+            kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+
+            if (pcl_wait_pub) pcl_wait_pub->clear();
+            if (pcl_wait_save) pcl_wait_save->clear();
+            if (featsFromMap) featsFromMap->clear();
+
+            path.poses.clear();
+            path.header.stamp = this->get_clock()->now();
+            path.header.frame_id = "camera_init";
+
+            flg_first_scan = true;
+            flg_EKF_inited = false;
+            Localmap_Initialized = false;
+            frame_num = 0;
+            scan_count = 0;
+            publish_count = 0;
+            lidar_pushed = false;
+            is_first_lidar = true;
+
+            last_timestamp_lidar = 0;
+            last_timestamp_imu = -1.0;
+            first_lidar_time = 0.0;
+            lidar_end_time = 0;
+
+            total_distance = 0;
+            total_residual = 0.0;
+            res_mean_last = 0.05;
+
+            p_imu->Reset();
+
+            RCLCPP_INFO(this->get_logger(), "Complete FAST-LIO reset finished successfully");
+        }
+        catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Error during complete reset: %s", e.what());
+        }
+    }
+// -------- Out-of-class definitions for pause/resume/reset helpers --------
+
+    void set_mapping_paused_callback(
+        const std_srvs::srv::SetBool::Request::ConstSharedPtr req,
+        const std_srvs::srv::SetBool::Response::SharedPtr res)
+    {
+        // req->data == false  -> resume (run)
+        // req->data == true -> pause (stop)
+        if (!req->data) {
+            bool was_paused = paused_;
+            // 요청이 '재생' 이고, 이전에 pause 상태였다면 reset과 유사하게 내부 상태를 초기화
+            if (was_paused) {
+                do_full_reset_();
+            }
+            resume_subscriptions_();
+            res->success = !paused_;
+            res->message = was_paused ? "Resumed (state reset) and running." : "Already running.";
+        } else {
+            do_full_reset_();
+            pause_subscriptions_();
+            res->success = paused_;
+            res->message = paused_ ? "Paused (subscriptions off, timers canceled)." : "Already paused.";
+        }
+    }
+
+    void pause_subscriptions_()
+    {
+        if (paused_) return;
+
+        // 타이머 멈춤
+        if (timer_) timer_->cancel();
+        if (map_pub_timer_) map_pub_timer_->cancel();
+
+        // 구독 해제
+        if (sub_imu_)       sub_imu_.reset();
+        if (sub_pcl_pc_)    sub_pcl_pc_.reset();
+        if (sub_pcl_livox_) sub_pcl_livox_.reset();
+
+        // 버퍼 비우기
+        {
+            std::lock_guard<std::mutex> lk(mtx_buffer);
+            lidar_buffer.clear();
+            imu_buffer.clear();
+            time_buffer.clear();
+            lidar_pushed = false;
+        }
+
+        paused_ = true;
+        RCLCPP_INFO(this->get_logger(), "[pause_mapping] paused and unsubscribed.");
+    }
+
+    void resume_subscriptions_()
+    {
+        if (!paused_) return;
+
+        if (timer_) timer_.reset();
+        if (map_pub_timer_) map_pub_timer_.reset();
+        sub_imu_.reset();
+        sub_pcl_pc_.reset();
+        sub_pcl_livox_.reset();
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_buffer);
+            lidar_buffer.clear();
+            imu_buffer.clear();
+            time_buffer.clear();
+            lidar_pushed = false;
+        }
+        is_first_lidar   = true;
+        flg_first_scan   = true;
+        last_timestamp_lidar = 0.0;
+        last_timestamp_imu   = -1.0;
+
+        if (p_pre->lidar_type == AVIA) {
+            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+                lid_topic, 20, livox_pcl_cbk);
+        } else {
+            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+        }
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
+            imu_topic, 10, imu_cbk);
+
+        auto period_ms    = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
+        timer_            = rclcpp::create_timer(this, this->get_clock(), period_ms,
+                            std::bind(&LaserMappingNode::timer_callback, this));
+        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 5.0));
+        map_pub_timer_    = rclcpp::create_timer(this, this->get_clock(), map_period_ms,
+                            std::bind(&LaserMappingNode::map_publish_callback, this));
+
+        paused_ = false;
+        RCLCPP_INFO(this->get_logger(),
+            "[resume_mapping] resumed with cached params: lidar_type=%d, lid_topic=%s, imu_topic=%s",
+            p_pre->lidar_type, lid_topic.c_str(), imu_topic.c_str());
+    }
+
+    void do_full_reset_()
+    {
+        RCLCPP_INFO(this->get_logger(), "Resetting FAST-LIO internal state (resume-like reset)...");
+        try {
+            {
+                std::lock_guard<std::mutex> lock(mtx_buffer);
+                lidar_buffer.clear();
+                imu_buffer.clear();
+                time_buffer.clear();
+            }
+
+            if (ikdtree.Root_Node != nullptr) {
+                PointVector points_to_delete;
+                ikdtree.flatten(ikdtree.Root_Node, points_to_delete, NOT_RECORD);
+                ikdtree.Delete_Points(points_to_delete);
+            }
+
+            kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+            if (pcl_wait_pub)  pcl_wait_pub->clear();
+            if (pcl_wait_save) pcl_wait_save->clear();
+            if (featsFromMap)  featsFromMap->clear();
+
+            path.poses.clear();
+            path.header.stamp = this->get_clock()->now();
+            path.header.frame_id = "camera_init";
+
+            flg_first_scan = true;
+            flg_EKF_inited = false;
+            Localmap_Initialized = false;
+            frame_num = 0;
+            scan_count = 0;
+            publish_count = 0;
+            lidar_pushed = false;
+            is_first_lidar = true;
+
+            last_timestamp_lidar = 0;
+            last_timestamp_imu = -1.0;
+            first_lidar_time = 0.0;
+            lidar_end_time = 0;
+
+            total_distance = 0;
+            total_residual = 0.0;
+            res_mean_last = 0.05;
+
+            p_imu->Reset();
+        }
+        catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Error during reset: %s", e.what());
         }
     }
 
@@ -1143,6 +1369,8 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+    rclcpp::Service<std_srvs::srv::Empty>::SharedPtr reset_mapping_srv_;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_pause_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
@@ -1178,7 +1406,7 @@ int main(int argc, char** argv)
 
     if (runtime_pos_log)
     {
-        vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
+        vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;
         FILE *fp2;
         string log_dir = root_dir + "/Log/fast_lio_time_log.csv";
         fp2 = fopen(log_dir.c_str(),"w");
